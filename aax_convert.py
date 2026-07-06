@@ -782,6 +782,9 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
                 os.unlink(m4a_path)
         if os.path.exists(concat_list):
             os.unlink(concat_list)
+        cover_output = os.path.join(destdir, "cover.jpg")
+        if os.path.exists(cover_output):
+            os.unlink(cover_output)
     elif args.verbose:
         print(f"Keeping intermediate files")
 

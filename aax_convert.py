@@ -750,15 +750,59 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
 
     # Embed chapters into the final m4b using MP4Box if available
     if args.container == "m4b" and shutil.which("MP4Box"):
-        # Build chapter list from original .aax metadata (m4a files don't preserve chapters via copy codec)
-        all_chapters = []
-        time_offset = 0.0
-        global_chapter_num = 0
         excluded = parse_exclude_chapters(args.exclude_chapters)
-        for i, md in enumerate(all_md):
-            chapters = md.get("chapters", [])
-            if not chapters:
-                # Try to get duration for time offset
+        has_exclusions = len(excluded) > 0
+
+        if has_exclusions:
+            # Chapters come from segment files (audio was already split)
+            all_chapters = []
+            time_offset = 0.0
+            for seg_file in intermediate_m4as:
+                try:
+                    result = subrun(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", seg_file],
+                        capture_output=True, text=True
+                    )
+                    duration = float(result.stdout.strip())
+                except Exception:
+                    continue
+
+                # Extract chapter number from segment filename (format: "003.m4a")
+                base = os.path.basename(seg_file)
+                name_part = os.path.splitext(base)[0]
+                try:
+                    title = f"Chapter {int(name_part)}"
+                except ValueError:
+                    title = f"Chapter {len(all_chapters) + 1}"
+
+                all_chapters.append((time_offset, title))
+                time_offset += duration
+        else:
+            # Build chapter list from original .aax metadata (m4a files don't preserve chapters via copy codec)
+            all_chapters = []
+            time_offset = 0.0
+            global_chapter_num = 0
+            for i, md in enumerate(all_md):
+                chapters = md.get("chapters", [])
+                if not chapters:
+                    # Try to get duration for time offset
+                    try:
+                        result = subrun(
+                            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", intermediate_m4as[i]],
+                            capture_output=True, text=True
+                        )
+                        duration = float(result.stdout.strip())
+                    except Exception:
+                        duration = 0
+                    time_offset += duration
+                    continue
+                for j, chapter in enumerate(chapters):
+                    global_chapter_num += 1
+                    if global_chapter_num in excluded:
+                        continue
+                    start_time = float(chapter["start_time"]) + time_offset
+                    all_chapters.append((start_time, global_chapter_num))
+                # Get duration for time offset
                 try:
                     result = subrun(
                         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", intermediate_m4as[i]],
@@ -768,35 +812,22 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
                 except Exception:
                     duration = 0
                 time_offset += duration
-                continue
-            for j, chapter in enumerate(chapters):
-                global_chapter_num += 1
-                if global_chapter_num in excluded:
-                    continue
-                start_time = float(chapter["start_time"]) + time_offset
-                all_chapters.append((start_time, global_chapter_num))
-            # Get duration for time offset
-            try:
-                result = subrun(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", intermediate_m4as[i]],
-                    capture_output=True, text=True
-                )
-                duration = float(result.stdout.strip())
-            except Exception:
-                duration = 0
-            time_offset += duration
 
         if all_chapters:
             chapter_file = os.path.join(destdir, "chapters.txt")
             with open(chapter_file, "w") as fd:
-                for i, (start_time, chapter_num) in enumerate(all_chapters):
+                for i, (start_time, title_or_num) in enumerate(all_chapters):
                     hours = int(start_time // 3600)
                     minutes = int((start_time % 3600) // 60)
                     seconds = int(start_time % 60)
                     ms = int((start_time % 1) * 1000)
                     time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{ms:03d}"
-                    fd.write(f"CHAPTER{i+1:02d}={time_str}\n")
-                    fd.write(f"CHAPTER{i+1:02d}name=Chapter {chapter_num}\n")
+                    if has_exclusions:
+                        fd.write(f"CHAPTER{i+1:02d}={time_str}\n")
+                        fd.write(f"CHAPTER{i+1:02d}name={title_or_num}\n")
+                    else:
+                        fd.write(f"CHAPTER{i+1:02d}={time_str}\n")
+                        fd.write(f"CHAPTER{i+1:02d}name=Chapter {title_or_num}\n")
             # Add chapters in-place using MP4Box (preserves metadata and cover art set by FFmpeg concat)
             mp4box_cmd = ["MP4Box", "-chap", chapter_file, output]
             subrun(mp4box_cmd)
@@ -895,6 +926,9 @@ def main():
         args.outdir += "-mono"
 
     if args.concat:
+        excluded = parse_exclude_chapters(args.exclude_chapters)
+        has_exclusions = len(excluded) > 0
+
         # Use a single output directory for all concatenated files
         first_md = probe_metadata(args, args.input[0])
         concat_destdir = os.path.join(
@@ -909,13 +943,84 @@ def main():
         all_md = []
         final_cover = None
 
-        for fn in args.input:
-            md = None
-            try:
-                md = probe_metadata(args, fn)
-            except Exception as e:
-                print(f"Caught exception {e} while probing metadata for {fn}")
-                continue
+        if has_exclusions:
+            # Split each .aax into chapter segments when chapters need to be removed
+            global_chapter_num = 0
+            for fn in args.input:
+                md = None
+                try:
+                    md = probe_metadata(args, fn)
+                except Exception as e:
+                    print(f"Caught exception {e} while probing metadata for {fn}")
+                    continue
+
+                chapters = md.get("chapters", [])
+                if not chapters:
+                    continue
+
+                # Split this .aax into chapter segments (with global numbering)
+                for chapter in chapters:
+                    global_chapter_num += 1
+                    chapter_title = chapter["tags"].get("title", f"Chapter {global_chapter_num}")
+                    start_time = float(chapter["start_time"])
+                    end_time = float(chapter["end_time"])
+                    duration = end_time - start_time
+
+                    # Check if this chapter is excluded
+                    if global_chapter_num in excluded:
+                        continue
+
+                    safe_title = sanitize(chapter_title).replace("_", " ")
+                    output_file = os.path.join(concat_destdir, f"{global_chapter_num:03d}.m4a")
+
+                    cmd = [
+                        "ffmpeg",
+                        "-loglevel", "error",
+                        "-activation_bytes", args.auth,
+                        "-ss", str(start_time),
+                        "-t", str(duration),
+                        "-i", fn,
+                        "-vn",
+                        "-codec:a", codecs[args.container][0],
+                        "-map_metadata", "-1",
+                        "-metadata", f'title={chapter_title}',
+                        output_file
+                    ]
+
+                    tags = md["format"]["tags"]
+                    if "artist" in tags:
+                        cmd.extend(["-metadata", f'artist={tags["artist"]}'])
+                    if "album" in tags:
+                        cmd.extend(["-metadata", f'album={tags["title"]}'])
+                    if "album_artist" in tags:
+                        cmd.extend(["-metadata", f'album_artist={tags["album_artist"]}'])
+                    if "date" in tags:
+                        cmd.extend(["-metadata", f'date={tags["date"]}'])
+                    if "genre" in tags:
+                        cmd.extend(["-metadata", f'genre={tags["genre"]}'])
+
+                    cmd_str = " ".join([f'"{arg}"' if " " in str(arg) else str(arg) for arg in cmd])
+                    rv = os.system(cmd_str.encode("utf-8"))
+                    if rv == 0:
+                        intermediate_m4as.append(output_file)
+
+                # Use first cover file found
+                if final_cover is None:
+                    cover_file = os.path.join(concat_destdir, "cover.jpg")
+                    try:
+                        extract_image(args, concat_destdir, fn)
+                        final_cover = cover_file
+                    except Exception:
+                        pass
+                all_md.append(md)
+        else:
+            for fn in args.input:
+                md = None
+                try:
+                    md = probe_metadata(args, fn)
+                except Exception as e:
+                    print(f"Caught exception {e} while probing metadata for {fn}")
+                    continue
 
             destfn = os.path.basename(fn).replace(".aax", ".m4a")
             output = os.path.join(concat_destdir, destfn)

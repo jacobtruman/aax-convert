@@ -40,15 +40,14 @@ dev = [
 ]
 
 [project.scripts]
-aax-convert = "aax_convert:main"
+aax-convert = "aax_convert.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/trucraft/aax-convert"
 Repository = "https://github.com/trucraft/aax-convert"
 
 [tool.hatchling.build.targets.wheel]
-packages = ["."]
-only-include = ["aax_convert.py"]
+packages = ["aax_convert"]
 
 [tool.black]
 line-length = 120

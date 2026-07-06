@@ -728,6 +728,7 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
         # Build chapter list from original .aax metadata (m4a files don't preserve chapters via copy codec)
         all_chapters = []
         time_offset = 0.0
+        global_chapter_num = 0
         for i, md in enumerate(all_md):
             chapters = md.get("chapters", [])
             if not chapters:
@@ -743,9 +744,9 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
                 time_offset += duration
                 continue
             for j, chapter in enumerate(chapters):
-                chapter_title = chapter["tags"].get("title", f"Chapter {j + 1}")
+                global_chapter_num += 1
                 start_time = float(chapter["start_time"]) + time_offset
-                all_chapters.append((start_time, chapter_title))
+                all_chapters.append((start_time, global_chapter_num))
             # Get duration for time offset
             try:
                 result = subrun(
@@ -760,16 +761,16 @@ def concat_files(args, intermediate_m4as, destdir, all_md, cover_file):
         if all_chapters:
             chapter_file = os.path.join(destdir, "chapters.txt")
             with open(chapter_file, "w") as fd:
-                for i, (start_time, chapter_title) in enumerate(all_chapters):
+                for i, (start_time, chapter_num) in enumerate(all_chapters):
                     hours = int(start_time // 3600)
                     minutes = int((start_time % 3600) // 60)
                     seconds = int(start_time % 60)
                     ms = int((start_time % 1) * 1000)
                     time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{ms:03d}"
-                    safe_title = sanitize(chapter_title).replace("_", " ")
                     fd.write(f"CHAPTER{i+1:02d}={time_str}\n")
-                    fd.write(f"CHAPTER{i+1:02d}name={safe_title}\n")
-            mp4box_cmd = ["MP4Box", "-itags", "title=0", "-add", output, "-chap", chapter_file, "-new", output]
+                    fd.write(f"CHAPTER{i+1:02d}name=Chapter {chapter_num}\n")
+            # Add chapters in-place using MP4Box (preserves metadata and cover art set by FFmpeg concat)
+            mp4box_cmd = ["MP4Box", "-chap", chapter_file, output]
             subrun(mp4box_cmd)
             if os.path.exists(chapter_file):
                 os.unlink(chapter_file)
